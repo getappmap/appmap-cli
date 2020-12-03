@@ -1,0 +1,25 @@
+{
+  "name": "@applandinc/appland-cli",
+  "version": "0.0.1",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "AppLand Inc.",
+  "license": "MIT",
+  "devDependencies": {
+    "chai": "^4.2.0",
+    "eslint": "^7.14.0",
+    "eslint-config-airbnb-base": "^14.2.1",
+    "eslint-plugin-import": "^2.22.1",
+    "mocha": "^8.2.1"
+  },
+  "dependencies": {
+    "JSONStream": "^1.3.5",
+    "commander": "^6.2.0",
+    "event-stream": "^4.0.1",
+    "request": "^2.88.2"
+  }
+}
