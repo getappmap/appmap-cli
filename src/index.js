@@ -1,18 +1,12 @@
 #! /usr/bin/env node
+const fs = require('fs');
+const prettyBytes = require('pretty-bytes');
+const sizeof = require('object-sizeof');
 const JSONStream = require('JSONStream');
-const request = require('request');
-const fs = require('fs/promises');
 const { Command } = require('commander');
 const program = new Command();
 
 program.version('0.0.1');
-
-program
-  .command('upload <file>')
-  .description('upload an appmap file')
-  .action((file) => {
-    console.log(`uploading ${file}`);
-  });
 
 function getStackId(collection) {
   return Object.keys(collection.activeStacks).length
@@ -37,11 +31,7 @@ class EventStack {
 }
 
 function traverse(obj, fn, parent = null) {
-  fn(obj);
-
-  if (parent) {
-    obj.parent = parent;
-  }
+  fn(obj, parent);
 
   if (obj.children) {
     obj.children.forEach(c => traverse(c, fn, obj))
@@ -78,7 +68,9 @@ class ClassMap {
     this.data = {children: [...data]};
     this.locationMap = {};
 
-    traverse(this.data, (obj) => {
+    traverse(this.data, (obj, parent) => {
+      obj.parent = parent;
+
       if (obj.location) {
         this.locationMap[obj.location] = obj;
       }
@@ -111,6 +103,10 @@ class ClassMap {
 
     return this.locationMap[`${event.path}:${event.lineno}`];
   }
+
+  forEach(fn) {
+    traverse(this.data, fn);
+  }
 }
 
 class EventStackCollection {
@@ -135,99 +131,159 @@ class EventStackCollection {
     }
   }
 
-  toArray() {
-    const stacks = [...this.finalizedStacks];
-    Object
-      .values(this.activeStacks)
-      .forEach(s => stacks.splice(s.id, 0, s.events));
-    return stacks;
+  get size() {
+    let size = sizeof(Object.values(this.activeStacks));
+    size += sizeof(this.finalizedStacks);
+    return size;
   }
 
+  // Iterate through every event added to this collection. This is slow and
+  // should be refactored if it needs to be called more than once.
   forEach(fn) {
+    // Join active and finalized stacks. We want to make sure we iterate over
+    // every event.
     const stacks = [...this.finalizedStacks];
     Object
       .values(this.activeStacks)
       .forEach(s => stacks.splice(s.id, 0, s.events));
 
-    // TODO: clean me up
-    let lastRootEvent = null;
     stacks.reduce((acc, events) => {
-      const firstEvent = events[0];
-      if (!firstEvent) {
+      // Sanity check - we should never have an empty list of events
+      if (events.length === 0) {
         return acc;
       }
 
-      if (firstEvent.http_server_request) {
+      // We're the first chunk in, meaning we don't need to worry about any
+      // chunks behind us. Just push it.
+      if (acc.length === 0) {
         acc.push(events);
-      } else {
-        let currentStack = null;
-        if (!lastRootEvent || lastRootEvent.http_server_request) {
-          currentStack = [];
-          acc.push(currentStack);
-        } else {
-          currentStack = acc[acc.length - 1];
-        }
-
-        currentStack.splice(currentStack.length - 1, 0, events);
+        return acc;
       }
 
-      lastRootEvent = firstEvent;
+      // If the root event is an HTTP request, this a complete chunk. Push it.
+      if (events[0].http_server_request) {
+        acc.push(events);
+        return acc;
+      }
+
+      // Check to see if the previous chunk began with an HTTP request. If it
+      // does, push a new chunk. Otherwise, append to the last chunk.
+      const prevChunk = acc[acc.length - 1];
+      if (prevChunk[0].http_server_request) {
+        acc.push(events);
+      } else {
+        // I'm opting not to use a spread operator here to avoid a stack
+        // overflow when processing a large file.
+        events.forEach(e => prevChunk.push(e));
+      }
+
       return acc;
     }, []).forEach(fn);
   }
 }
 
-program
-  .command('parse <url>')
-  .description('parse an appmap file from url')
-  .action((url) => {
-    const stream = JSONStream.parse('events.*');
-    request(url).pipe(stream);
+function codeObjectName(obj) {
+  let classScope = [];
+  let { parent } = obj;
 
-    const stackCollection = new EventStackCollection();
-    let classMap = null;
-    let header = {};
-    stream
-      .on('header', d => header = d)
-      .on('data', d => stackCollection.add(d))
+  while (parent && parent.name) {
+    classScope.push(parent.name);
+    parent = parent.parent;
+  }
+
+  return `${classScope.reverse().join('.')}${obj.static ? '#' : '.'}${obj.name}`;
+}
+
+function eventName(e) {
+  return `${e.defined_class}${e.static ? '#' : '.'}${e.method_id}`;
+}
+
+program
+  .command('prune <file>')
+  .option('-s, --size <bytes>')
+  .description('parse an appmap file from url')
+  .action((file, cmd) => {
+    let data = {};
+    const chunks = new EventStackCollection();
+    const jsonStream = JSONStream.parse('events.*')
+      .on('header', obj => data = {...data, ...obj})
+      .on('footer', obj => data = {...data, ...obj})
+      .on('data', e => chunks.add(e))
       .on('close', () => {
-        const mainClassMap = new ClassMap(header.classMap);
-        stackCollection.forEach((s) => {
-          s.forEach((e) => {
-            const obj = mainClassMap.get(e);
+        const classMap = new ClassMap(data.classMap);
+        const pruneRatio = Math.min(cmd.size / chunks.size, 1);
+        const prunedEvents = [];
+
+        console.log(`Pruning chunks by ${((1.0 - pruneRatio) * 100).toFixed(2)}%`);
+
+        chunks.forEach((events) => {
+          // Sanity check. This should never occur.
+          if (events.length === 0) {
+            return;
+          }
+
+          // We're storing size/count state in the global class map. This isn't
+          // great but it works for now. Reset the counts for each chunk.
+          classMap.forEach((obj) => {
+            obj.size = 0;
+            obj.count = 0;
+          });
+
+          // Calculate totals for pruning.
+          events.forEach((e) => {
+            if (e.event !== 'call' || e.sql_query || e.http_server_request) {
+              return;
+            }
+  
+            const obj = classMap.get(e);
             if (obj) {
+              const size = sizeof(e);
+              obj.size = obj.size + size || size;
               obj.count = obj.count + 1 || 1;
             }
           });
-        })
 
-        Object
-        .values(mainClassMap.locationMap)
-        .filter(obj => obj.count)
-        .sort((a, b) => a.count - b.count)
-        .forEach((obj) => {
-          console.log(`${obj.parent.name}${obj.static ? '#' : '.'}${obj.name} -> ${obj.count}`);
+          // Build an array of code objects sorted by size. The largest object
+          // will always be index 0.
+          let totalBytes = 0;
+          const eventAggregates = Object
+            .values(classMap.locationMap)
+            .filter(obj => obj.size)
+            .sort((a, b) => b.size - a.size)
+            .map((obj) => ({
+              name: codeObjectName(obj),
+              count: obj.count,
+              size: obj.size,
+              totalBytes: totalBytes += obj.size
+            }))
+            .reverse();
+
+          // Perform pruning
+          if (cmd.size) {
+            const exclusions = new Set();
+            for(let i = 0; i < eventAggregates.length; ++i) {
+              const eventInfo = eventAggregates[i];
+              if (eventInfo.totalBytes <= totalBytes * pruneRatio) {
+                break;
+              }
+              exclusions.add(eventInfo.name);
+            }
+            
+            events
+              .filter(e => !exclusions.has(eventName(e)))
+              .forEach(e => prunedEvents.push(e));
+          }
         });
-        // console.log(mainClassMap);
-        // stackCollection.forEach((s, i) => {
-          // const classMap = new ClassMap();
-          // s.forEach((e) => {
-          //   const obj = mainClassMap.clone(e);
-          //   classMap.merge(obj);
-          // });
-          // console.log(classMap);
-          // fs.writeFile(`data/${i}.appmap.json`, JSON.stringify({...header, events: s}))
-        // })
+
+        // HACK
+        // Break the parent -> child / child -> parent cycle in the class map
+        // before serializing. Otherwise it will fail.
+        traverse({children: data.classMap}, (obj) => delete obj.parent);
+
+        fs.writeFileSync('data/out.json', JSON.stringify({...data, events: prunedEvents}));
       });
 
-    // stream.on('header', (d) => {
-    //   console.error(d);
-    // });
-      // .pipe(es.mapSync((data) => {
-      //   console.error(data)
-      //   return data
-      // }))
-      // .pipe(process.stdout);
+    fs.createReadStream(file).pipe(jsonStream);
   });
 
 program.parse(process.argv);
