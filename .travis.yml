@@ -1,0 +1,25 @@
+language: node_js
+os: linux
+dist: xenial
+node_js: [ 14 ]
+
+install:
+  - npm install
+
+script:
+  - npm build
+
+deploy:
+  provider: script
+  script: |
+    cd dist
+    for i in *; do
+      tar -czf $i.tar.gz --transform 's/-.*//' $i
+    done
+  skip_cleanup: true
+  github_token: $GITHUB_TOKEN
+  file:
+    - dist/*.tar.gz
+  on:
+    tags: true
+    condition: $TRAVIS_OS_NAME = linux
