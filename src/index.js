@@ -4,6 +4,7 @@ const sizeof = require('object-sizeof');
 const JSONStream = require('JSONStream');
 const { Command } = require('commander');
 const { CallTree, buildAppmap } = require('@appland/models');
+const { type } = require('os');
 
 const program = new Command();
 
@@ -109,28 +110,6 @@ class ClassMap {
   }
 }
 
-function codeObjectName(obj) {
-  let classScope = [];
-  let { parent } = obj;
-
-  while (parent && parent.name) {
-    classScope.push(parent.name);
-    parent = parent.parent;
-  }
-
-  return `${classScope.reverse().join('.')}${obj.static ? '#' : '.'}${obj.name}`;
-}
-
-function eventName(classMap, e) {
-  const callEvent = e.event === 'call' ? e : e.eventCall;
-  const obj = classMap.get(callEvent);
-  if (obj) {
-    return codeObjectName(obj);
-  }
-
-  return `${callEvent.defined_class}${callEvent.static ? '#' : '.'}${callEvent.method_id}`;
-}
-
 async function fromFile(filePath) {
   let data = { events: [] };
 
@@ -145,102 +124,47 @@ async function fromFile(filePath) {
   });
 }
 
+const binaryPrefixes = {
+  B: 1,
+  KB: 1 << 10,
+  MB: 1 << 20,
+  GB: 1 << 30,
+};
+
+// This isn't very robust
+function parseSize(size) {
+  const [_, byteStr, unit] = /(\d+)[\s+]?(\w+)?/.exec(size);
+  if (!unit) {
+    return Number(byteStr);
+  }
+
+  const p = binaryPrefixes[unit.toUpperCase()];
+  if (!p) {
+    throw `unknown size ${size}`;
+  }
+
+  return Number(byteStr) * p;
+}
+
 program
   .command('prune <file>')
   .option('-s, --size <bytes>')
   .description('parse an appmap file from url')
   .action(async (file, cmd) => {
-    let classMap;
-    let pruneRatio = 1.0;
-    let eventId = 10000;
+    const builder = buildAppmap()
+    .source(await fromFile(file))
+    .normalize();
 
-    const appmap = buildAppmap()
-      .source(await fromFile(file))
-      .on('preprocess', (d) => {
-        classMap = new ClassMap(d.data.classMap);
-        pruneRatio = Math.min(cmd.size / d.size, 1);
+    if (cmd.size) {
+      const bytes = parseSize(cmd.size);
+      Object.entries(binaryPrefixes)
+        .forEach(([k, v]) => console.log(`${bytes / v}${k}`))
+      builder.prune(bytes);
+    }
 
-        console.log(`Pruning chunks by ${((1.0 - pruneRatio) * 100).toFixed(2)}%`);
-      })
-      .event(event => {
-        event.id = ++eventId;
-        if (event.eventReturn) {
-          event.eventReturn.parent_id = event.id;
-        }
-        return event;
-      })
-      .stack(events => events)
-      .chunk((stacks) => {
-        if (cmd.size === false) {
-          return stacks;
-        }
-
-        // Begin pruning
-        // We're storing size/count state in the global class map. This isn't
-        // great but it works for now. Reset the counts for each chunk.
-        classMap.forEach((obj) => {
-          obj.size = 0;
-          obj.count = 0;
-        });
-
-        stacks.flat(2).forEach((e) => {
-          if (e.event !== 'call' || e.sql_query || e.http_server_request) {
-            return;
-          }
-
-          const obj = classMap.get(e);
-          if (obj) {
-            const objSize = sizeof(e);
-            obj.size = obj.size + objSize || objSize;
-            obj.count = obj.count + 1 || 1;
-          }
-        });
-
-        // Build an array of code objects sorted by size. The largest object
-        // will always be index 0.
-        let totalBytes = 0;
-        const eventAggregates = Object
-          .values(classMap.locationMap)
-          .filter(obj => obj.size)
-          .sort((a, b) => b.size - a.size)
-          .map((obj) => ({
-            name: codeObjectName(obj),
-            count: obj.count,
-            size: obj.size,
-            totalBytes: totalBytes += obj.size
-          }))
-          .reverse();
-
-        const exclusions = new Set();
-        for(let i = 0; i < eventAggregates.length; ++i) {
-          const eventInfo = eventAggregates[i];
-          if (eventInfo.totalBytes <= totalBytes * pruneRatio) {
-            break;
-          }
-          exclusions.add(eventInfo.name);
-        }
-
-        // Calculate totals for pruning.
-        return stacks.map(events =>
-          events.filter((e) => {
-            const eventCall = e.event === 'call' ? e : e.eventCall;
-            if (eventCall.http_server_request || eventCall.sql_query) {
-              return true;
-            }
-
-            const name = eventName(classMap, e);
-            console.log(name, exclusions.has(name));
-            return !exclusions.has(name)
-          }));
-      })
-      .build();
-
-      // HACK
-      // Break the parent -> child / child -> parent cycle in the class map
-      // before serializing. Otherwise it will fail.
-      traverse({children: appmap.classMap}, (obj) => delete obj.parent);
-
-      fs.writeFileSync('data/out.json', appmap.toJson());
+    const appmap = builder.build();
+    fs.writeFileSync('data/out.appmap.json',
+      JSON.stringify(appmap.serialize()));
   });
 
 program.parse(process.argv);
