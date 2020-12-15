@@ -8,18 +8,13 @@ install:
 
 script:
   - npm build
+  - for i in dist/*; do tar -czf "$(echo $i | sed 's/\..*//')-x64.tar.gz" --transform 's/^[^\.]*/appmap/' $i; done
 
 deploy:
-  provider: script
-  script: |
-    cd dist
-    for i in *; do
-      tar -czf $i.tar.gz --transform 's/-.*//' $i
-    done
+  provider: releases
   skip_cleanup: true
-  github_token: $GITHUB_TOKEN
-  file:
-    - dist/*.tar.gz
+  api_key: $GITHUB_TOKEN
+  file: dist/*.tar.gz
   on:
     tags: true
     condition: $TRAVIS_OS_NAME = linux
