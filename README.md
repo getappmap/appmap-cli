@@ -1,12 +1,12 @@
 # Installation
-```
+```sh
 $ npm install
 ```
 
 # Usage
-```
-$ node src/index.js
-Usage: index [options] [command]
+```sh
+$ appmap
+Usage: appmap [options] [command]
 
 Options:
   -V, --version           output the version number
@@ -19,18 +19,17 @@ Commands:
 
 ## Pruning
 `prune` will remove large event types to meet a maximum size requirement.
-```
-Usage: index prune [options] <file>
+```sh
+Usage: appmap prune [options] <input> <size>
 
-parse an appmap file from url
+prune an appmap file down to the given size (if applicable)
 
 Options:
-  -s, --size <bytes>  
-  -h, --help          display help for command
+  -o, --output-dir <dir>  specify the output directory (default: ".")
+  -h, --help              display help for command
 ```
 
 Example:
-```
-# provide the size in bytes
-$ node src/index.js prune appland.results.json --size 150000000
+```sh
+$ appmap prune appland.results.json 2MB
 ```
