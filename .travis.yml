@@ -7,7 +7,7 @@ install:
   - npm install
 
 script:
-  - npm build
+  - npm run build
   - for i in dist/*; do tar -czf "$(echo $i | sed 's/\..*//')-x64.tar.gz" --transform 's/^[^\.]*/appmap/' $i; done
 
 deploy:
