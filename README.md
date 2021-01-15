@@ -1,11 +1,6 @@
 # Installation
 Pre-built binaries are available [here](https://github.com/applandinc/appmap-cli/releases).
 
-or run via `npx`
-```sh
-$ npx @appland/appmap-cli
-```
-
 # Usage
 ```sh
 $ appmap
